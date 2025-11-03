@@ -66,4 +66,5 @@ export interface ChatMessage {
   text: string;
   sender: MessageSender;
   feedback?: FeedbackStatus;
+  citations?: string[];
 }
