@@ -1,64 +1,127 @@
+import type { GroundingEvidence } from '../types';
 
-// NOTE: This is a mock service for the MVP to simulate a RAG backend.
-// It does not make actual calls to the Gemini API but instead returns
-// hardcoded responses based on keywords to fulfill the PRD's acceptance criteria.
-// This allows for full frontend development and testing of the user experience.
+export interface StreamCallbacks {
+  onChunk: (text: string) => void;
+  onComplete: (payload: { text: string; evidences: GroundingEvidence[] }) => void;
+  onError: (message: string) => void;
+}
 
-// Represents a call to a logging service (e.g., Google Spreadsheet API)
-const logFeedback = (
-    question: string,
-    answer: string,
-    feedback: 'Positive' | 'Negative',
-    sessionId: string
-) => {
-    console.log('--- FEEDBACK LOGGED ---');
-    console.log('Timestamp:', new Date().toISOString());
-    console.log('Session ID:', sessionId);
-    console.log('Question:', question);
-    console.log('Answer:', answer);
-    console.log('Feedback:', feedback);
-    console.log('-----------------------');
-    // In a real application, this would be an API call.
-    return Promise.resolve();
+export interface StreamRagResponseParams {
+  question: string;
+  sessionId?: string;
+  signal?: AbortSignal;
+  callbacks: StreamCallbacks;
+}
+
+function parseEventBlock(block: string): { event: string; data: string } | null {
+  const lines = block.split('\n');
+  let event = 'message';
+  const dataLines: string[] = [];
+  lines.forEach((line) => {
+    if (line.startsWith('event:')) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith('data:')) {
+      dataLines.push(line.slice(5).trim());
+    }
+  });
+
+  if (dataLines.length === 0) {
+    return null;
+  }
+
+  return { event, data: dataLines.join('') };
+}
+
+async function readEventStream(response: Response, callbacks: StreamCallbacks, abortController: AbortController) {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new Error('스트리밍 응답을 읽을 수 없습니다.');
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let isCompleted = false;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+
+    let separatorIndex = buffer.indexOf('\n\n');
+    while (separatorIndex !== -1) {
+      const rawEvent = buffer.slice(0, separatorIndex);
+      buffer = buffer.slice(separatorIndex + 2);
+      const parsed = parseEventBlock(rawEvent.trim());
+      if (parsed) {
+        try {
+          const payload = parsed.data ? JSON.parse(parsed.data) : {};
+          switch (parsed.event) {
+            case 'answer':
+              if (typeof payload.text === 'string') {
+                callbacks.onChunk(payload.text);
+              }
+              break;
+            case 'complete':
+              callbacks.onComplete({
+                text: typeof payload.text === 'string' ? payload.text : '',
+                evidences: Array.isArray(payload.evidences) ? payload.evidences : [],
+              });
+              isCompleted = true;
+              break;
+            case 'error':
+              callbacks.onError(typeof payload.message === 'string' ? payload.message : '알 수 없는 오류가 발생했습니다.');
+              abortController.abort();
+              return;
+            case 'end':
+              if (!isCompleted) {
+                callbacks.onComplete({ text: '', evidences: [] });
+              }
+              abortController.abort();
+              return;
+            default:
+              break;
+          }
+        } catch (error) {
+          console.warn('이벤트 스트림을 파싱하는 중 오류가 발생했습니다.', error);
+        }
+      }
+      separatorIndex = buffer.indexOf('\n\n');
+    }
+  }
+}
+
+export const geminiRagClient = {
+  async streamRagResponse({ question, sessionId, signal, callbacks }: StreamRagResponseParams): Promise<void> {
+    const controller = new AbortController();
+    if (signal) {
+      signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ question, sessionId }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      let errorMessage = '답변을 가져오는 중 오류가 발생했습니다.';
+      try {
+        const body = await response.json();
+        if (body?.error) {
+          errorMessage = body.error;
+        }
+      } catch (error) {
+        console.warn('오류 응답 본문을 파싱하지 못했습니다.', error);
+      }
+      callbacks.onError(errorMessage);
+      return;
+    }
+
+    await readEventStream(response, callbacks, controller);
+  },
 };
-
-export const simulatedGeminiService = {
-    getGroundedResponse: async (prompt: string): Promise<{ text: string; source: string; }> => {
-        // Simulate network delay
-        await new Promise(res => setTimeout(res, 1000));
-
-        const lowerCasePrompt = prompt.toLowerCase();
-
-        // Test Case 1: Relevant, In-Domain Question
-        if (lowerCasePrompt.includes('관찰일지')) {
-            return {
-                text: "관찰일지에는 관찰 아동, 날짜 및 시간, 관찰 장면 및 상황, 해석 및 평가, 그리고 교사의 지원 계획이 포함되어야 합니다. 이는 아동의 발달을 종합적으로 이해하고 지원하기 위한 필수 요소입니다.",
-                source: "Source: 표준보육과정 해설서, p.34"
-            };
-        }
-
-        // Test Case 2: Irrelevant, Out-of-Domain Question
-        if (lowerCasePrompt.includes('맛집') || lowerCasePrompt.includes('식당')) {
-            return {
-                text: "죄송합니다, 저는 보육 관련 질문에만 답변할 수 있어요.",
-                source: ""
-            };
-        }
-
-        // Generic in-domain response for other childcare-related questions
-        if (lowerCasePrompt.includes('보육') || lowerCasePrompt.includes('교사') || lowerCasePrompt.includes('아이')) {
-            return {
-                text: "영유아의 발달 특성을 고려한 상호작용은 매우 중요합니다. 교사는 영유아의 놀이를 지지하고 확장하며, 긍정적인 또래 관계를 형성할 수 있도록 도와야 합니다.",
-                source: "Source: 제4차 어린이집 표준보육과정, p.12"
-            };
-        }
-
-        // Default out-of-domain response
-        return {
-            text: "죄송합니다, 저는 보육 관련 질문에만 답변할 수 있어요. 보육, 영유아, 교사 역할 등과 관련된 질문을 해주세요.",
-            source: ""
-        };
-    },
-    logFeedback
-};
-   

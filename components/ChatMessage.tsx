@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { ChatMessage as ChatMessageType } from '../types';
 import { ThumbsUpIcon, ThumbsDownIcon, CopyIcon, CheckIcon } from './icons';
@@ -20,41 +19,75 @@ const ChatMessage: React.FC<ChatMessageProps> = ({ message, isStreaming, onFeedb
 
   const handleCopy = () => {
     if (message.text) {
-        onCopy(message.text);
-        setIsCopied(true);
-        setTimeout(() => setIsCopied(false), 2000);
+      onCopy(message.text);
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
     }
   };
+
+  const showControls = !isUser && !isStreaming && message.text;
 
   return (
     <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} mb-6 animate-fade-in-up`}>
       <div className={`${baseBubbleClasses} ${isUser ? userBubbleClasses : aiBubbleClasses}`}>
         <p className="whitespace-pre-wrap">
-            {message.text}
-            {isStreaming && <span className="inline-block w-2 h-5 bg-blue-500 rounded-sm animate-pulse ml-1" />}
+          {message.text}
+          {(isStreaming || !message.isComplete) && (
+            <span className="inline-block w-2 h-5 bg-blue-500 rounded-sm animate-pulse ml-1" />
+          )}
         </p>
       </div>
-      {!isUser && !isStreaming && message.text && (
+
+      {message.sources && message.sources.length > 0 && (
+        <div className="mt-3 ml-1 space-y-2 text-xs text-gray-600 bg-white border border-gray-200 rounded-lg shadow-sm px-4 py-3">
+          <p className="font-semibold text-gray-700">참고 근거</p>
+          <ul className="space-y-2 list-disc list-inside">
+            {message.sources.map((source) => (
+              <li key={source.id}>
+                <span className="font-medium text-gray-700">{source.title}</span>
+                {source.citation && <span className="text-gray-500"> · {source.citation}</span>}
+                <div className="text-gray-500 mt-1 whitespace-pre-wrap">{source.snippet}</div>
+                {source.uri && (
+                  <a
+                    href={source.uri}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-blue-600 hover:underline"
+                  >
+                    자세히 보기
+                  </a>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {showControls && (
         <div className="mt-2 text-xs text-gray-500 flex items-center space-x-4 pl-2">
-             <div className="flex items-center space-x-2">
-               <button 
-                 onClick={() => onFeedback(message.id, 'positive')}
-                 className={`p-1 rounded-full transition-colors ${message.feedback === 'positive' ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-200 text-gray-500'}`}
-                 aria-label="Good answer"
-               >
-                 <ThumbsUpIcon className="w-4 h-4" />
-               </button>
-               <button 
-                 onClick={() => onFeedback(message.id, 'negative')}
-                 className={`p-1 rounded-full transition-colors ${message.feedback === 'negative' ? 'bg-red-100 text-red-600' : 'hover:bg-gray-200 text-gray-500'}`}
-                 aria-label="Bad answer"
-               >
-                 <ThumbsDownIcon className="w-4 h-4" />
-               </button>
-               <button onClick={handleCopy} className="p-1 rounded-full hover:bg-gray-200 text-gray-500 transition-colors" aria-label="Copy answer">
-                {isCopied ? <CheckIcon className="w-4 h-4 text-green-600" /> : <CopyIcon className="w-4 h-4" />}
-               </button>
-             </div>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={() => onFeedback(message.id, 'positive')}
+              className={`p-1 rounded-full transition-colors ${message.feedback === 'positive' ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-200 text-gray-500'}`}
+              aria-label="Good answer"
+            >
+              <ThumbsUpIcon className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => onFeedback(message.id, 'negative')}
+              className={`p-1 rounded-full transition-colors ${message.feedback === 'negative' ? 'bg-red-100 text-red-600' : 'hover:bg-gray-200 text-gray-500'}`}
+              aria-label="Bad answer"
+            >
+              <ThumbsDownIcon className="w-4 h-4" />
+            </button>
+            <button
+              onClick={handleCopy}
+              className="p-1 rounded-full hover:bg-gray-200 text-gray-500 transition-colors"
+              aria-label="Copy answer"
+            >
+              {isCopied ? <CheckIcon className="w-4 h-4 text-green-600" /> : <CopyIcon className="w-4 h-4" />}
+            </button>
+          </div>
         </div>
       )}
     </div>
