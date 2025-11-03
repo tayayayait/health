@@ -10,11 +10,18 @@ import {
   ScenarioProgress,
   SendMessageOptions,
 } from './types';
-import { GoogleGenAI } from "@google/genai";
+import { streamChatCompletion, ChatRequestPayload } from './services/geminiService';
 import { trainingModules } from './services/curriculum';
 
 const App: React.FC = () => {
   const modules = useMemo(() => trainingModules, []);
+  const geminiApiKey = useMemo(() => {
+    if (typeof import.meta === 'undefined' || !import.meta.env) {
+      return undefined;
+    }
+    const env = import.meta.env as Record<string, string | undefined>;
+    return env.VITE_GEMINI_API_KEY ?? env['VITE_GEMINI_API_KEY'];
+  }, []);
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'init',
@@ -24,6 +31,7 @@ const App: React.FC = () => {
     }
   ]);
   const [isLoading, setIsLoading] = useState(false);
+  const [hasShownApiKeyWarning, setHasShownApiKeyWarning] = useState(false);
   const [selectedModuleId, setSelectedModuleId] = useState<string>(() => modules[0]?.id ?? '');
   const [selectedScenarioId, setSelectedScenarioId] = useState<string>(() => modules[0]?.scenarios[0]?.id ?? '');
   const [selectedDifficultyId, setSelectedDifficultyId] = useState<DifficultyLevelId | null>(
@@ -71,13 +79,6 @@ const App: React.FC = () => {
     return selectedScenario.evaluationRubrics.filter((rubric) => stageContent.rubricFocus.includes(rubric.id));
   }, [selectedScenario, stageContent]);
 
-  const selectedRubric = useMemo(() => {
-    if (!selectedScenario || !selectedRubricId) {
-      return null;
-    }
-    return selectedScenario.evaluationRubrics.find((rubric) => rubric.id === selectedRubricId) ?? null;
-  }, [selectedScenario, selectedRubricId]);
-
   useEffect(() => {
     if (!selectedModule) {
       return;
@@ -119,55 +120,20 @@ const App: React.FC = () => {
     }
   }, [selectedScenario, stageContent, selectedRubricId]);
 
-  const chat = useMemo(() => {
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const instructionParts: string[] = [
-        'You are a professional AI mentor supporting childcare teachers in Korea. Provide evidence-informed, culturally relevant guidance.',
-      ];
-
-      if (selectedModule) {
-        instructionParts.push(
-          `Training module: ${selectedModule.name} (${selectedModule.focusArea}). Focus on ${selectedModule.description}.`,
-        );
-      }
-
-      if (selectedScenario) {
-        instructionParts.push(
-          `Scenario: ${selectedScenario.title}. Summary: ${selectedScenario.summary}`,
-        );
-      }
-
-      if (selectedDifficulty) {
-        instructionParts.push(
-          `Difficulty level: ${selectedDifficulty.label} - ${selectedDifficulty.description}. Adjust explanations to match this depth.`,
-        );
-      }
-
-      if (stageContent) {
-        instructionParts.push(
-          `Current learning stage: ${LEARNING_STAGE_LABELS[selectedStage]} - ${stageContent.description}. Provide responses that align with this stage's objectives.`,
-        );
-      }
-
-      const rubricForInstruction = selectedRubric ?? (stageRubrics.length ? stageRubrics[0] : null);
-      if (rubricForInstruction) {
-        instructionParts.push(
-          `Key evaluation focus: ${rubricForInstruction.title} (${rubricForInstruction.description}). Indicators: ${rubricForInstruction.performanceIndicators.join(', ')}. Reference these in feedback.`,
-        );
-      }
-
-      return ai.chats.create({
-        model: 'gemini-2.5-flash',
-        config: {
-          systemInstruction: instructionParts.join('\n'),
-        },
-      });
-    } catch (e) {
-      console.error(e);
-      return null;
+  useEffect(() => {
+    if (geminiApiKey || hasShownApiKeyWarning) {
+      return;
     }
-  }, [selectedModule, selectedScenario, selectedDifficulty, selectedStage, selectedRubric, stageRubrics]);
+    const warningMessage: ChatMessage = {
+      id: `warning-${Date.now()}`,
+      text: 'Gemini API 키가 설정되지 않았습니다. .env.local 파일에 VITE_GEMINI_API_KEY를 등록한 후 다시 시도해 주세요.',
+      sender: 'ai',
+      feedback: null,
+    };
+    setMessages((prev) => [...prev, warningMessage]);
+    setHasShownApiKeyWarning(true);
+  }, [geminiApiKey, hasShownApiKeyWarning]);
+
   const handleModuleChange = useCallback((moduleId: string) => {
     setSelectedModuleId(moduleId);
     const module = modules.find((item) => item.id === moduleId);
@@ -213,9 +179,21 @@ const App: React.FC = () => {
   }, []);
 
   const handleSendMessage = useCallback(async (text: string, options?: SendMessageOptions) => {
+    if (!geminiApiKey) {
+      const warningMessage: ChatMessage = {
+        id: `warning-${Date.now()}`,
+        text: '현재 Gemini API 키가 구성되지 않아 답변을 생성할 수 없습니다. .env.local 파일의 VITE_GEMINI_API_KEY를 확인해 주세요.',
+        sender: 'ai',
+        feedback: null,
+      };
+      setMessages((prev) => [...prev, warningMessage]);
+      setHasShownApiKeyWarning(true);
+      return;
+    }
+
     const activeStage = options?.stage ?? selectedStage;
 
-    if (!chat || !selectedModule || !selectedScenario) {
+    if (!selectedModule || !selectedScenario) {
       const errorMessage: ChatMessage = {
         id: `err-${Date.now()}`,
         text: "죄송합니다. AI 서비스를 초기화하는 데 실패했습니다. API 키와 커리큘럼 선택을 확인해 주세요.",
@@ -247,29 +225,7 @@ const App: React.FC = () => {
       ? progressForScenario.completedStages.map((stage) => LEARNING_STAGE_LABELS[stage]).join(', ')
       : '없음';
 
-    const contextParts: string[] = [];
-    contextParts.push(`모듈: ${selectedModule.name} (${selectedModule.focusArea}) - ${selectedModule.description}`);
-    contextParts.push(`시나리오: ${selectedScenario.title} | ${selectedScenario.summary}`);
-    if (selectedDifficulty) {
-      contextParts.push(`난이도: ${selectedDifficulty.label} - ${selectedDifficulty.description}`);
-    }
     const stageLabel = LEARNING_STAGE_LABELS[activeStage];
-    if (scenarioStageContent) {
-      contextParts.push(`학습 단계: ${stageLabel} - ${scenarioStageContent.description}`);
-    } else {
-      contextParts.push(`학습 단계: ${stageLabel}`);
-    }
-    if (contextRubrics.length) {
-      contextParts.push(
-        `평가 기준: ${contextRubrics
-          .map((rubric) => `${rubric.title} - ${rubric.description} (지표: ${rubric.performanceIndicators.join(', ')})`)
-          .join(' | ')}`,
-      );
-    }
-    contextParts.push(`완료된 단계: ${completedStageNames}`);
-
-    const payload = `${contextParts.join('\n')}` + `\n\n사용자 질문: ${text}`;
-
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       text,
@@ -287,70 +243,132 @@ const App: React.FC = () => {
     setIsLoading(true);
 
     try {
-      const stream = await chat.sendMessageStream({ message: payload });
+      const requestPayload: ChatRequestPayload = {
+        message: text,
+        context: {
+          module: {
+            id: selectedModule.id,
+            name: selectedModule.name,
+            focusArea: selectedModule.focusArea,
+            description: selectedModule.description,
+          },
+          scenario: {
+            id: selectedScenario.id,
+            title: selectedScenario.title,
+            summary: selectedScenario.summary,
+          },
+          difficulty: selectedDifficulty
+            ? {
+                id: selectedDifficulty.id,
+                label: selectedDifficulty.label,
+                description: selectedDifficulty.description,
+              }
+            : null,
+          stage: {
+            id: activeStage,
+            label: stageLabel,
+            description: scenarioStageContent?.description,
+          },
+          rubrics: contextRubrics.map(
+            (rubric) => `${rubric.title} - ${rubric.description} (지표: ${rubric.performanceIndicators.join(', ')})`,
+          ),
+          progressSummary: completedStageNames,
+        },
+      };
 
-      let fullResponse = '';
-      for await (const chunk of stream) {
-        fullResponse += chunk.text;
-        setMessages((prev) =>
-          prev.map((msg) => (msg.id === aiMessageStub.id ? { ...msg, text: fullResponse } : msg)),
-        );
+      let aggregatedText = '';
+      let finalCitations: string[] = [];
+      let streamCompleted = false;
+
+      for await (const event of streamChatCompletion(requestPayload)) {
+        if (event.type === 'chunk') {
+          aggregatedText += event.text;
+          setMessages((prev) =>
+            prev.map((msg) => (msg.id === aiMessageStub.id ? { ...msg, text: aggregatedText } : msg)),
+          );
+        } else if (event.type === 'done') {
+          streamCompleted = true;
+          aggregatedText = event.text ?? aggregatedText;
+          finalCitations = event.citations ?? [];
+          const textWithCitations = finalCitations.length
+            ? `${aggregatedText}\n\n출처:\n${finalCitations.map((citation) => `- ${citation}`).join('\n')}`
+            : aggregatedText;
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === aiMessageStub.id
+                ? {
+                    ...msg,
+                    text: textWithCitations,
+                    citations: finalCitations,
+                  }
+                : msg,
+            ),
+          );
+        } else if (event.type === 'error') {
+          const errorText = event.message ?? '죄송합니다. 답변을 생성하는 중에 오류가 발생했습니다.';
+          setMessages((prev) =>
+            prev.map((msg) => (msg.id === aiMessageStub.id ? { ...msg, text: errorText } : msg)),
+          );
+          return;
+        }
       }
 
-      let shouldAppendFeedback = false;
-      setProgress((prev) => {
-        const scenarioProgress = prev[selectedScenario.id] ?? { completedStages: [], feedbackDelivered: [] };
-        const completedStages = scenarioProgress.completedStages.includes(activeStage)
-          ? scenarioProgress.completedStages
-          : [...scenarioProgress.completedStages, activeStage];
-        let feedbackDelivered = scenarioProgress.feedbackDelivered;
-        const hasFeedbackMaterial = !!(
-          scenarioStageContent &&
-          (scenarioStageContent.selfAssessmentChecklist.length || scenarioStageContent.followUpQuestions.length)
-        );
-        if (hasFeedbackMaterial && !scenarioProgress.feedbackDelivered.includes(activeStage)) {
-          feedbackDelivered = [...scenarioProgress.feedbackDelivered, activeStage];
-          shouldAppendFeedback = true;
-        }
-        return {
-          ...prev,
-          [selectedScenario.id]: {
-            completedStages,
-            feedbackDelivered,
-          },
-        };
-      });
-
-      if (shouldAppendFeedback && scenarioStageContent) {
-        const checklistText = scenarioStageContent.selfAssessmentChecklist
-          .map((item, index) => `${index + 1}. ${item}`)
-          .join('\n');
-        const followUpText = scenarioStageContent.followUpQuestions
-          .map((question, index) => `${index + 1}. ${question}`)
-          .join('\n');
-        const rubricText = contextRubrics.length
-          ? contextRubrics.map((rubric) => `- ${rubric.title}: ${rubric.performanceIndicators.join(', ')}`).join('\n')
-          : '';
-
-        const feedbackSections: string[] = [];
-        if (checklistText) {
-          feedbackSections.push(`자가 평가 체크리스트\n${checklistText}`);
-        }
-        if (followUpText) {
-          feedbackSections.push(`후속 질문 제안\n${followUpText}`);
-        }
-        if (rubricText) {
-          feedbackSections.push(`평가 기준 리마인드\n${rubricText}`);
-        }
-
-        if (feedbackSections.length) {
-          const feedbackMessage: ChatMessage = {
-            id: `ai-feedback-${Date.now()}`,
-            text: `${stageLabel} 단계 피드백 루프 제안\n\n${feedbackSections.join('\n\n')}`,
-            sender: 'ai',
-            feedback: null,
+      if (streamCompleted) {
+        let shouldAppendFeedback = false;
+        setProgress((prev) => {
+          const scenarioProgress = prev[selectedScenario.id] ?? { completedStages: [], feedbackDelivered: [] };
+          const completedStagesUpdate = scenarioProgress.completedStages.includes(activeStage)
+            ? scenarioProgress.completedStages
+            : [...scenarioProgress.completedStages, activeStage];
+          let feedbackDelivered = scenarioProgress.feedbackDelivered;
+          const hasFeedbackMaterial = !!(
+            scenarioStageContent &&
+            (scenarioStageContent.selfAssessmentChecklist.length || scenarioStageContent.followUpQuestions.length)
+          );
+          if (hasFeedbackMaterial && !scenarioProgress.feedbackDelivered.includes(activeStage)) {
+            feedbackDelivered = [...scenarioProgress.feedbackDelivered, activeStage];
+            shouldAppendFeedback = true;
+          }
+          return {
+            ...prev,
+            [selectedScenario.id]: {
+              completedStages: completedStagesUpdate,
+              feedbackDelivered,
+            },
           };
-          setMessages((prev) => [...prev, feedbackMessage]);
+        });
+
+        if (shouldAppendFeedback && scenarioStageContent) {
+          const checklistText = scenarioStageContent.selfAssessmentChecklist
+            .map((item, index) => `${index + 1}. ${item}`)
+            .join('\n');
+          const followUpText = scenarioStageContent.followUpQuestions
+            .map((question, index) => `${index + 1}. ${question}`)
+            .join('\n');
+          const rubricText = contextRubrics.length
+            ? contextRubrics.map((rubric) => `- ${rubric.title}: ${rubric.performanceIndicators.join(', ')}`).join('\n')
+            : '';
+
+          const feedbackSections: string[] = [];
+          if (checklistText) {
+            feedbackSections.push(`자가 평가 체크리스트\n${checklistText}`);
+          }
+          if (followUpText) {
+            feedbackSections.push(`후속 질문 제안\n${followUpText}`);
+          }
+          if (rubricText) {
+            feedbackSections.push(`평가 기준 리마인드\n${rubricText}`);
+          }
+
+          if (feedbackSections.length) {
+            const feedbackMessage: ChatMessage = {
+              id: `ai-feedback-${Date.now()}`,
+              text: `${stageLabel} 단계 피드백 루프 제안\n\n${feedbackSections.join('\n\n')}`,
+              sender: 'ai',
+              feedback: null,
+            };
+            setMessages((prev) => [...prev, feedbackMessage]);
+          }
         }
       }
     } catch (error) {
@@ -362,15 +380,15 @@ const App: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [
-    chat,
-    selectedModule,
-    selectedScenario,
-    selectedDifficulty,
-    selectedRubricId,
-    progress,
-    selectedStage,
-  ]);
+    }, [
+      selectedModule,
+      selectedScenario,
+      selectedDifficulty,
+      selectedRubricId,
+      progress,
+      selectedStage,
+      geminiApiKey,
+    ]);
 
   const handleFeedback = useCallback((id: string, feedback: 'positive' | 'negative') => {
     setMessages(prevMessages => 
