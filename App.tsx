@@ -1,5 +1,5 @@
 
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import ChatInterface from './components/ChatInterface';
 import { ChatMessage } from './types';
 import { GoogleGenAI, Chat } from "@google/genai";
@@ -14,10 +14,15 @@ const App: React.FC = () => {
     }
   ]);
   const [isLoading, setIsLoading] = useState(false);
+  const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
 
   const chat = useMemo(() => {
+    if (!apiKey) {
+      console.error('Gemini API key is missing. Please set VITE_GEMINI_API_KEY.');
+      return null;
+    }
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey });
       return ai.chats.create({
         model: 'gemini-2.5-flash',
         config: {
@@ -28,14 +33,30 @@ const App: React.FC = () => {
       console.error(e);
       return null;
     }
-  }, []);
+  }, [apiKey]);
+
+  useEffect(() => {
+    if (!apiKey) {
+      setMessages(prev => [
+        ...prev,
+        {
+          id: 'missing-key',
+          text: '현재 AI 기능을 사용할 수 없습니다. 환경 변수 VITE_GEMINI_API_KEY를 설정한 뒤 다시 시도해 주세요.',
+          sender: 'ai',
+          feedback: null,
+        },
+      ]);
+    }
+  }, [apiKey]);
 
 
   const handleSendMessage = useCallback(async (text: string) => {
     if (!chat) {
       const errorMessage: ChatMessage = {
           id: `err-${Date.now()}`,
-          text: "죄송합니다. AI 서비스를 초기화하는 데 실패했습니다. API 키 설정을 확인해 주세요.",
+          text: apiKey
+            ? "죄송합니다. AI 서비스를 초기화하는 데 실패했습니다. API 키 설정을 확인해 주세요."
+            : "현재 AI 서비스를 사용할 수 없습니다. 환경 변수 VITE_GEMINI_API_KEY를 설정해 주세요.",
           sender: 'ai',
           feedback: null
       };
@@ -78,7 +99,7 @@ const App: React.FC = () => {
     } finally {
         setIsLoading(false);
     }
-  }, [chat]);
+  }, [chat, apiKey]);
 
   const handleFeedback = useCallback((id: string, feedback: 'positive' | 'negative') => {
     setMessages(prevMessages => 
